@@ -66,10 +66,10 @@ impl Painter {
         let Cell {
             cursor,
             ref grapheme,
-            quadrant,
             background: cell_bg,
             foreground: cell_fg,
             codepoint,
+            ..
         } = *cell;
 
         let (background, foreground, width) = if let Some(grapheme) = grapheme {
@@ -77,14 +77,7 @@ impl Painter {
                 return Ok(());
             }
 
-            (
-                quadrant.0
-                    .avg_with(quadrant.1)
-                    .avg_with(quadrant.2)
-                    .avg_with(quadrant.3),
-                grapheme.color,
-                grapheme.width as u32,
-            )
+            (cell_bg, grapheme.color, grapheme.width as u32)
         } else {
             (cell_bg, cell_fg, 1)
         };

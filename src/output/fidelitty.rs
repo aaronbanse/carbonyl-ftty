@@ -16,14 +16,23 @@ pub struct FttyUnicodePixel {
 pub type FttyContext = *mut c_void;
 pub type FttyPipeline = *mut c_void;
 
+#[repr(C)]
+pub enum FttyPixelFormat {
+    Rgb = 0,
+    Bgra = 1,
+}
+
 extern "C" {
     pub fn ftty_context_create(max_pipelines: u8) -> FttyContext;
     pub fn ftty_context_destroy(ctx: FttyContext);
 
-    pub fn ftty_context_create_render_pipeline(
+    pub fn ftty_context_create_render_pipeline_ex(
         ctx: FttyContext,
         w: u16,
         h: u16,
+        pixel_format: FttyPixelFormat,
+        src_cell_w: u8,
+        src_cell_h: u8,
     ) -> FttyPipeline;
     pub fn ftty_context_destroy_render_pipeline(ctx: FttyContext, handle: FttyPipeline);
     pub fn ftty_context_resize_render_pipeline(
@@ -45,8 +54,4 @@ extern "C" {
 
     pub fn ftty_pipeline_get_input_surface(handle: FttyPipeline) -> *mut u8;
     pub fn ftty_pipeline_get_output_surface(handle: FttyPipeline) -> *mut FttyUnicodePixel;
-    pub fn ftty_pipeline_get_dims(handle: FttyPipeline, w: *mut u16, h: *mut u16);
-
-    pub fn ftty_get_patch_width() -> u8;
-    pub fn ftty_get_patch_height() -> u8;
 }

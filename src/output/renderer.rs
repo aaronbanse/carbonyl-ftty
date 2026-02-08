@@ -117,7 +117,10 @@ impl Renderer {
 
             unsafe {
                 if ftty.pipeline.is_null() {
-                    ftty.pipeline = ftty_context_create_render_pipeline(ftty.ctx, w, h);
+                    ftty.pipeline = ftty_context_create_render_pipeline_ex(
+                        ftty.ctx, w, h,
+                        FttyPixelFormat::Bgra, 2, 4,
+                    );
                     if ftty.pipeline.is_null() {
                         log::debug!("fidelitty: failed to create render pipeline");
                     }
@@ -238,16 +241,13 @@ impl Renderer {
         let ftty = self.ftty.as_ref().unwrap();
         let viewport = self.size.cast::<usize>();
         let row_length = pixels_size.width as usize;
-        let input_width = viewport.width * 4;
+        let input_width = viewport.width * 2; // 2 pixels per cell, BGRA
 
         let input_surface = unsafe { ftty_pipeline_get_input_surface(ftty.pipeline) };
         if input_surface.is_null() {
             return;
         }
 
-        // Copy BGRA pixels from Chromium buffer (2x4 per cell) to RGB fidelitty
-        // input surface (4x4 per cell). Horizontal 2x nearest-neighbor upscale.
-        // Also compute quadrant colors per cell in the same pass.
         let dispatch_w = (right - left) as u16;
         let dispatch_h = (bottom - top) as u16;
 
@@ -255,51 +255,35 @@ impl Renderer {
             return;
         }
 
-        for cy in top..bottom {
-            let cell_index = (cy + 1) * viewport.width;
-            let py_base = cy * 4;
+        // Copy BGRA pixels directly to fidelitty input surface.
+        // The GPU shader handles BGRA→RGB swizzle and 2→4 horizontal upscale.
+        let bpp = 4usize; // BGRA bytes per pixel
+        let row_bytes = input_width * bpp;
 
-            for cx in left..right {
-                let sx = cx * 2;
-                let dx = cx * 4;
-
-                // Read the 8 source pixels (2 cols × 4 rows) once
-                let mut rgb = [[0u8; 3]; 8]; // [row*2+col] = [R, G, B]
-                for dy in 0..4usize {
-                    let py = py_base + dy;
-                    for dsx in 0..2usize {
-                        let src = (py * row_length + sx + dsx) * 4;
-                        let idx = dy * 2 + dsx;
-                        rgb[idx] = [pixels[src + 2], pixels[src + 1], pixels[src + 0]];
-                    }
-                }
-
-                // Write to fidelitty input surface (2x horizontal duplication)
-                unsafe {
-                    for dy in 0..4usize {
-                        let py = py_base + dy;
-                        for dsx in 0..2usize {
-                            let [r, g, b] = rgb[dy * 2 + dsx];
-                            let dst = (py * input_width + dx + dsx * 2) * 3;
-                            *input_surface.add(dst + 0) = r;
-                            *input_surface.add(dst + 1) = g;
-                            *input_surface.add(dst + 2) = b;
-                            *input_surface.add(dst + 3) = r;
-                            *input_surface.add(dst + 4) = g;
-                            *input_surface.add(dst + 5) = b;
-                        }
-                    }
-                }
-
-                // Compute quadrant from the same pixels (pair = avg of 2 rows)
-                let c = |idx: usize| Color::new(rgb[idx][0], rgb[idx][1], rgb[idx][2]);
-                let pair = |col: usize, row: usize| c(row * 2 + col).avg_with(c((row + 1) * 2 + col));
-                self.cells[cell_index + cx].1.quadrant = (
-                    pair(0, 0), // TL: col 0, rows 0-1
-                    pair(1, 0), // TR: col 1, rows 0-1
-                    pair(1, 2), // BR: col 1, rows 2-3
-                    pair(0, 2), // BL: col 0, rows 2-3
+        if row_length == input_width {
+            // Strides match — single memcpy for the entire row block
+            let start = top * 4 * row_bytes;
+            let total = (bottom - top) * 4 * row_bytes;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    pixels.as_ptr().add(start),
+                    input_surface.add(start),
+                    total,
                 );
+            }
+        } else {
+            // Different strides — copy row by row
+            let copy_bytes = (right - left) * 2 * bpp;
+            for py in (top * 4)..(bottom * 4) {
+                let src_offset = (py * row_length + left * 2) * bpp;
+                let dst_offset = (py * input_width + left * 2) * bpp;
+                unsafe {
+                    ptr::copy_nonoverlapping(
+                        pixels.as_ptr().add(src_offset),
+                        input_surface.add(dst_offset),
+                        copy_bytes,
+                    );
+                }
             }
         }
 
@@ -351,7 +335,7 @@ impl Renderer {
         let t_readback = t_start.elapsed();
 
         log::debug!(
-            "fidelitty: {}x{} region | copy+quadrant: {:?} | gpu: {:?} | readback: {:?} | total: {:?}",
+            "fidelitty: {}x{} region | copy: {:?} | gpu: {:?} | readback: {:?} | total: {:?}",
             dispatch_w,
             dispatch_h,
             t_copy,

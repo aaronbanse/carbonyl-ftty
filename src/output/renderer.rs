@@ -1,6 +1,8 @@
 use std::{
     io::{self, Write},
+    ptr,
     rc::Rc,
+    time::Instant,
 };
 
 use unicode_segmentation::UnicodeSegmentation;
@@ -13,22 +15,42 @@ use crate::{
     utils::log,
 };
 
-use super::{Cell, Grapheme, Painter};
+use super::{binarize_quandrant, Cell, Grapheme, Painter};
+use super::fidelitty::*;
+
+struct FidelittyState {
+    ctx: FttyContext,
+    pipeline: FttyPipeline,
+}
 
 pub struct Renderer {
     nav: Navigation,
     cells: Vec<(Cell, Cell)>,
     painter: Painter,
     size: Size,
+    ftty: Option<FidelittyState>,
 }
 
 impl Renderer {
     pub fn new() -> Renderer {
+        let ftty_ctx = unsafe { ftty_context_create(1) };
+        let ftty = if ftty_ctx.is_null() {
+            log::debug!("fidelitty: Vulkan not available, using fallback renderer");
+            None
+        } else {
+            log::debug!("fidelitty: Vulkan context created");
+            Some(FidelittyState {
+                ctx: ftty_ctx,
+                pipeline: ptr::null_mut(),
+            })
+        };
+
         Renderer {
             nav: Navigation::new(),
             cells: Vec::with_capacity(0),
             painter: Painter::new(),
             size: Size::new(0, 0),
+            ftty,
         }
     }
 
@@ -87,9 +109,32 @@ impl Renderer {
 
             cell
         });
+
+        // Create or resize fidelitty pipeline
+        if let Some(ref mut ftty) = self.ftty {
+            let w = size.width as u16;
+            let h = size.height as u16;
+
+            unsafe {
+                if ftty.pipeline.is_null() {
+                    ftty.pipeline = ftty_context_create_render_pipeline(ftty.ctx, w, h);
+                    if ftty.pipeline.is_null() {
+                        log::debug!("fidelitty: failed to create render pipeline");
+                    }
+                } else {
+                    let ret = ftty_context_resize_render_pipeline(
+                        ftty.ctx, ftty.pipeline, w, h,
+                    );
+                    if ret != 0 {
+                        log::debug!("fidelitty: failed to resize render pipeline");
+                    }
+                }
+            }
+        }
     }
 
     pub fn render(&mut self) -> io::Result<()> {
+        let t_start = Instant::now();
         let size = self.size;
 
         for (origin, element) in self.nav.render(size) {
@@ -105,25 +150,45 @@ impl Renderer {
             );
         }
 
+        let t_nav = t_start.elapsed();
+
         self.painter.begin()?;
 
+        let mut cells_painted = 0u32;
         for (previous, current) in self.cells.iter_mut() {
             if current == previous {
                 continue;
             }
 
             previous.quadrant = current.quadrant;
+            previous.background = current.background;
+            previous.foreground = current.foreground;
+            previous.codepoint = current.codepoint;
             previous.grapheme = current.grapheme.clone();
 
             self.painter.paint(current)?;
+            cells_painted += 1;
         }
 
+        let t_diff_paint = t_start.elapsed();
+
         self.painter.end(self.nav.cursor())?;
+
+        let t_flush = t_start.elapsed();
+
+        log::debug!(
+            "render: {} cells painted | nav: {:?} | diff+paint: {:?} | flush: {:?} | total: {:?}",
+            cells_painted,
+            t_nav,
+            t_diff_paint - t_nav,
+            t_flush - t_diff_paint,
+            t_flush
+        );
 
         Ok(())
     }
 
-    /// Draw the background from a pixel array encoded in RGBA8888
+    /// Draw the background from a pixel array encoded in BGRA8888
     pub fn draw_background(&mut self, pixels: &[u8], pixels_size: Size, rect: Rect) {
         let viewport = self.size.cast::<usize>();
 
@@ -146,15 +211,175 @@ impl Renderer {
         let bottom = ((origin.y + size.height).ceil() as usize)
             .min(viewport.height)
             .max(top);
+
+        let use_fidelitty = match self.ftty {
+            Some(ref ftty) => !ftty.pipeline.is_null(),
+            None => false,
+        };
+
+        if use_fidelitty {
+            self.draw_background_fidelitty(pixels, pixels_size, top, left, right, bottom);
+        } else {
+            self.draw_background_fallback(pixels, pixels_size, top, left, right, bottom);
+        }
+    }
+
+    fn draw_background_fidelitty(
+        &mut self,
+        pixels: &[u8],
+        pixels_size: Size,
+        top: usize,
+        left: usize,
+        right: usize,
+        bottom: usize,
+    ) {
+        let t_start = Instant::now();
+
+        let ftty = self.ftty.as_ref().unwrap();
+        let viewport = self.size.cast::<usize>();
         let row_length = pixels_size.width as usize;
-        let pixel = |x, y| {
+        let input_width = viewport.width * 4;
+
+        let input_surface = unsafe { ftty_pipeline_get_input_surface(ftty.pipeline) };
+        if input_surface.is_null() {
+            return;
+        }
+
+        // Copy BGRA pixels from Chromium buffer (2x4 per cell) to RGB fidelitty
+        // input surface (4x4 per cell). Horizontal 2x nearest-neighbor upscale.
+        // Also compute quadrant colors per cell in the same pass.
+        let dispatch_w = (right - left) as u16;
+        let dispatch_h = (bottom - top) as u16;
+
+        if dispatch_w == 0 || dispatch_h == 0 {
+            return;
+        }
+
+        for cy in top..bottom {
+            let cell_index = (cy + 1) * viewport.width;
+            let py_base = cy * 4;
+
+            for cx in left..right {
+                let sx = cx * 2;
+                let dx = cx * 4;
+
+                // Read the 8 source pixels (2 cols × 4 rows) once
+                let mut rgb = [[0u8; 3]; 8]; // [row*2+col] = [R, G, B]
+                for dy in 0..4usize {
+                    let py = py_base + dy;
+                    for dsx in 0..2usize {
+                        let src = (py * row_length + sx + dsx) * 4;
+                        let idx = dy * 2 + dsx;
+                        rgb[idx] = [pixels[src + 2], pixels[src + 1], pixels[src + 0]];
+                    }
+                }
+
+                // Write to fidelitty input surface (2x horizontal duplication)
+                unsafe {
+                    for dy in 0..4usize {
+                        let py = py_base + dy;
+                        for dsx in 0..2usize {
+                            let [r, g, b] = rgb[dy * 2 + dsx];
+                            let dst = (py * input_width + dx + dsx * 2) * 3;
+                            *input_surface.add(dst + 0) = r;
+                            *input_surface.add(dst + 1) = g;
+                            *input_surface.add(dst + 2) = b;
+                            *input_surface.add(dst + 3) = r;
+                            *input_surface.add(dst + 4) = g;
+                            *input_surface.add(dst + 5) = b;
+                        }
+                    }
+                }
+
+                // Compute quadrant from the same pixels (pair = avg of 2 rows)
+                let c = |idx: usize| Color::new(rgb[idx][0], rgb[idx][1], rgb[idx][2]);
+                let pair = |col: usize, row: usize| c(row * 2 + col).avg_with(c((row + 1) * 2 + col));
+                self.cells[cell_index + cx].1.quadrant = (
+                    pair(0, 0), // TL: col 0, rows 0-1
+                    pair(1, 0), // TR: col 1, rows 0-1
+                    pair(1, 2), // BR: col 1, rows 2-3
+                    pair(0, 2), // BL: col 0, rows 2-3
+                );
+            }
+        }
+
+        let t_copy = t_start.elapsed();
+
+        unsafe {
+            let ret = ftty_context_execute_render_pipeline_region(
+                ftty.ctx,
+                ftty.pipeline,
+                left as u16,
+                top as u16,
+                dispatch_w,
+                dispatch_h,
+            );
+            if ret != 0 {
+                log::debug!("fidelitty: execute failed");
+                return;
+            }
+
+            let ret = ftty_context_wait_render_pipeline(ftty.ctx, ftty.pipeline);
+            if ret != 0 {
+                log::debug!("fidelitty: wait failed");
+                return;
+            }
+        }
+
+        let t_gpu = t_start.elapsed();
+
+        // Read fidelitty output into cells
+        let output_surface = unsafe { ftty_pipeline_get_output_surface(ftty.pipeline) };
+        if output_surface.is_null() {
+            return;
+        }
+
+        for y in top..bottom {
+            let cell_index = (y + 1) * viewport.width;
+            let out_row = y * viewport.width;
+
+            for cx in left..right {
+                let ftty_pixel = unsafe { *output_surface.add(out_row + cx) };
+                let cell = &mut self.cells[cell_index + cx].1;
+
+                cell.background = Color::new(ftty_pixel.br, ftty_pixel.bg, ftty_pixel.bb);
+                cell.foreground = Color::new(ftty_pixel.fr, ftty_pixel.fg, ftty_pixel.fb);
+                cell.codepoint = ftty_pixel.codepoint;
+            }
+        }
+
+        let t_readback = t_start.elapsed();
+
+        log::debug!(
+            "fidelitty: {}x{} region | copy+quadrant: {:?} | gpu: {:?} | readback: {:?} | total: {:?}",
+            dispatch_w,
+            dispatch_h,
+            t_copy,
+            t_gpu - t_copy,
+            t_readback - t_gpu,
+            t_readback
+        );
+    }
+
+    fn draw_background_fallback(
+        &mut self,
+        pixels: &[u8],
+        pixels_size: Size,
+        top: usize,
+        left: usize,
+        right: usize,
+        bottom: usize,
+    ) {
+        let viewport = self.size.cast::<usize>();
+        let row_length = pixels_size.width as usize;
+        let pixel = |x: usize, y: usize| {
             Color::new(
-                pixels[((x + y * row_length) * 4 + 2) as usize],
-                pixels[((x + y * row_length) * 4 + 1) as usize],
-                pixels[((x + y * row_length) * 4 + 0) as usize],
+                pixels[(x + y * row_length) * 4 + 2],
+                pixels[(x + y * row_length) * 4 + 1],
+                pixels[(x + y * row_length) * 4 + 0],
             )
         };
-        let pair = |x, y| pixel(x, y).avg_with(pixel(x, y + 1));
+        let pair = |x: usize, y: usize| pixel(x, y).avg_with(pixel(x, y + 1));
 
         for y in top..bottom {
             let index = (y + 1) * viewport.width;
@@ -163,12 +388,18 @@ impl Renderer {
             let (mut x, y) = (left * 2, y * 4);
 
             for (_, cell) in &mut self.cells[start..end] {
-                cell.quadrant = (
+                let quadrant = (
                     pair(x + 0, y + 0),
                     pair(x + 1, y + 0),
                     pair(x + 1, y + 2),
                     pair(x + 0, y + 2),
                 );
+
+                cell.quadrant = quadrant;
+                let (ch, bg, fg) = binarize_quandrant(quadrant);
+                cell.background = bg;
+                cell.foreground = fg;
+                cell.codepoint = ch.chars().next().unwrap_or(' ') as u32;
 
                 x += 2;
             }
@@ -195,6 +426,9 @@ impl Renderer {
         self.draw(rect, |cell| {
             cell.grapheme = None;
             cell.quadrant = (color, color, color, color);
+            cell.background = color;
+            cell.foreground = color;
+            cell.codepoint = 0x20; // space
         })
     }
 
@@ -278,6 +512,19 @@ impl Renderer {
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        if let Some(ref mut ftty) = self.ftty {
+            unsafe {
+                if !ftty.pipeline.is_null() {
+                    ftty_context_destroy_render_pipeline(ftty.ctx, ftty.pipeline);
+                }
+                ftty_context_destroy(ftty.ctx);
             }
         }
     }

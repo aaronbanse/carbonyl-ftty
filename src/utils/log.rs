@@ -1,3 +1,5 @@
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::Path;
 
 use chrono::prelude::*;
@@ -42,8 +44,8 @@ pub(crate) use warning;
 pub fn write(level: &str, file: &str, line: u32, message: &str) {
     let date = Utc::now();
 
-    eprintln!(
-        "[{:02}{:02}/{:02}{:02}{:02}.{:06}:{}:{}({})] {}",
+    let msg = format!(
+        "[{:02}{:02}/{:02}{:02}{:02}.{:06}:{}:{}({})] {}\n",
         date.month(),
         date.day(),
         date.hour(),
@@ -55,4 +57,12 @@ pub fn write(level: &str, file: &str, line: u32, message: &str) {
         line,
         message
     );
+
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open("/tmp/carbonyl.log")
+    {
+        let _ = f.write_all(msg.as_bytes());
+    }
 }

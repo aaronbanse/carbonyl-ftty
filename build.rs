@@ -41,4 +41,14 @@ fn link_sysroot() {
 
 fn main() {
     link_sysroot();
+
+    // Link fidelitty shared library for GPU-accelerated terminal rendering
+    println!("cargo:rustc-link-lib=dylib=fidelitty");
+
+    // Search path for libfidelitty.so
+    if let Ok(lib_dir) = std::env::var("FIDELITTY_LIB_DIR") {
+        println!("cargo:rustc-link-search=native={}", lib_dir);
+    } else {
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
+    }
 }

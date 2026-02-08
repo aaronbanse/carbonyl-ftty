@@ -1,6 +1,7 @@
 // mod kd_tree;
 // mod quantizer;
 mod cell;
+mod fidelitty;
 mod frame_sync;
 mod painter;
 mod quad;

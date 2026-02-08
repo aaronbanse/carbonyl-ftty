@@ -2,7 +2,7 @@ use std::io::{self, Stdout, Write};
 
 use crate::gfx::{Color, Point};
 
-use super::{binarize_quandrant, Cell};
+use super::Cell;
 
 pub struct Painter {
     output: Stdout,
@@ -63,21 +63,22 @@ impl Painter {
     }
 
     pub fn paint(&mut self, cell: &Cell) -> io::Result<()> {
-        let &Cell {
+        let Cell {
             cursor,
-            quadrant,
             ref grapheme,
-        } = cell;
+            quadrant,
+            background: cell_bg,
+            foreground: cell_fg,
+            codepoint,
+        } = *cell;
 
-        let (char, background, foreground, width) = if let Some(grapheme) = grapheme {
+        let (background, foreground, width) = if let Some(grapheme) = grapheme {
             if grapheme.index > 0 {
                 return Ok(());
             }
 
             (
-                grapheme.char.as_str(),
-                quadrant
-                    .0
+                quadrant.0
                     .avg_with(quadrant.1)
                     .avg_with(quadrant.2)
                     .avg_with(quadrant.3),
@@ -85,9 +86,7 @@ impl Painter {
                 grapheme.width as u32,
             )
         } else {
-            let (char, background, foreground) = binarize_quandrant(quadrant);
-
-            (char, background, foreground, 1)
+            (cell_bg, cell_fg, 1)
         };
 
         if self.cursor != Some(cursor) {
@@ -136,7 +135,14 @@ impl Painter {
             }
         }
 
-        self.buffer.write_all(char.as_bytes())?;
+        if let Some(grapheme) = grapheme {
+            self.buffer.write_all(grapheme.char.as_bytes())?;
+        } else {
+            let mut buf = [0u8; 4];
+            let ch = char::from_u32(codepoint).unwrap_or(' ');
+            let encoded = ch.encode_utf8(&mut buf);
+            self.buffer.write_all(encoded.as_bytes())?;
+        }
 
         Ok(())
     }

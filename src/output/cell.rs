@@ -11,13 +11,16 @@ pub struct Grapheme {
     pub color: Color,
 }
 
-/// Terminal cell with `height = width * 2`
+/// Terminal cell representing a single character position.
 #[derive(PartialEq)]
 pub struct Cell {
     pub cursor: Point<u32>,
     /// Text grapheme if any
     pub grapheme: Option<Rc<Grapheme>>,
     pub quadrant: (Color, Color, Color, Color),
+    pub background: Color,
+    pub foreground: Color,
+    pub codepoint: u32,
 }
 
 impl Cell {
@@ -25,12 +28,10 @@ impl Cell {
         Cell {
             cursor: Point::new(x, y),
             grapheme: None,
-            quadrant: (
-                Color::black(),
-                Color::black(),
-                Color::black(),
-                Color::black(),
-            ),
+            quadrant: (Color::black(), Color::black(), Color::black(), Color::black()),
+            background: Color::black(),
+            foreground: Color::black(),
+            codepoint: 0x20, // space
         }
     }
 }

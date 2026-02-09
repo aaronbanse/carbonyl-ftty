@@ -15,6 +15,13 @@ O —— Cr —— O
   </tbody>
 </table>
 
+## Carbonyl-ftty installation
+Ensure you have [fidelitty 0.1.0](https://github.com/aaronbanse/fidelitty) installed as a shared library to `/usr/local`.
+
+Run `scripts/install.sh`. This will pull the correct carbonyl release, build carbonyl-ftty (should only take a few seconds), and install everything including libfidelitty.so and the new version of libcarbonyl.so to `/usr/local/lib/carbonyl`, and symlink the carbonyl binary to `/usr/bin`.
+
+## About
+
 Carbonyl is a Chromium based browser built to run in a terminal. [Read the blog post](https://fathy.fr/carbonyl).
 
 It supports pretty much all Web APIs including WebGL, WebGPU, audio and video playback, animations, etc..

@@ -51,4 +51,10 @@ fn main() {
     } else {
         println!("cargo:rustc-link-search=native=/usr/local/lib");
     }
+
+    // Set RPATH so the runtime linker finds libfidelitty next to the binary
+    #[cfg(target_os = "linux")]
+    println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+    #[cfg(target_os = "macos")]
+    println!("cargo:rustc-link-arg=-Wl,-rpath,@loader_path");
 }

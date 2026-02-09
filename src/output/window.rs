@@ -90,8 +90,8 @@ impl Window {
 
         // Round DPI to 2 decimals for proper viewport computations
         self.dpi = (2.0 / cell_width * zoom * 100.0).ceil() / 100.0;
-        // A virtual cell should contain a 2x4 pixel quadrant
-        self.scale = Size::new(2.0, 4.0) / self.dpi;
+        // A virtual cell should contain a 4x8 pixel region
+        self.scale = Size::new(4.0, 8.0) / self.dpi;
         // Keep some space for the UI
         self.cells = Size::new(term.width.max(1), term.height.max(2) - 1).cast();
         self.browser = self.cells.cast::<f32>().mul(self.scale).ceil().cast();

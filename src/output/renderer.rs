@@ -119,7 +119,7 @@ impl Renderer {
                 if ftty.pipeline.is_null() {
                     ftty.pipeline = ftty_context_create_render_pipeline_ex(
                         ftty.ctx, w, h,
-                        FttyPixelFormat::Bgra, 2, 4,
+                        FttyPixelFormat::Bgra, 4, 8,
                     );
                     if ftty.pipeline.is_null() {
                         log::debug!("fidelitty: failed to create render pipeline");
@@ -147,7 +147,7 @@ impl Renderer {
             );
             self.draw_text(
                 &element.text,
-                origin * (2, 1),
+                origin * (4, 1),
                 Size::splat(0),
                 element.foreground,
             );
@@ -195,17 +195,17 @@ impl Renderer {
     pub fn draw_background(&mut self, pixels: &[u8], pixels_size: Size, rect: Rect) {
         let viewport = self.size.cast::<usize>();
 
-        if pixels.len() < viewport.width * viewport.height * 8 * 4 {
+        if pixels.len() < viewport.width * viewport.height * 32 * 4 {
             log::debug!(
                 "unexpected size, actual: {}, expected: {}",
                 pixels.len(),
-                viewport.width * viewport.height * 8 * 4
+                viewport.width * viewport.height * 32 * 4
             );
             return;
         }
 
-        let origin = rect.origin.cast::<f32>().max(0.0) / (2.0, 4.0);
-        let size = rect.size.cast::<f32>().max(0.0) / (2.0, 4.0);
+        let origin = rect.origin.cast::<f32>().max(0.0) / (4.0, 8.0);
+        let size = rect.size.cast::<f32>().max(0.0) / (4.0, 8.0);
         let top = (origin.y.floor() as usize).min(viewport.height);
         let left = (origin.x.floor() as usize).min(viewport.width);
         let right = ((origin.x + size.width).ceil() as usize)
@@ -241,7 +241,7 @@ impl Renderer {
         let ftty = self.ftty.as_ref().unwrap();
         let viewport = self.size.cast::<usize>();
         let row_length = pixels_size.width as usize;
-        let input_width = viewport.width * 2; // 2 pixels per cell, BGRA
+        let input_width = viewport.width * 4; // 4 pixels per cell, BGRA
 
         let input_surface = unsafe { ftty_pipeline_get_input_surface(ftty.pipeline) };
         if input_surface.is_null() {
@@ -256,14 +256,14 @@ impl Renderer {
         }
 
         // Copy BGRA pixels directly to fidelitty input surface.
-        // The GPU shader handles BGRA→RGB swizzle and 2→4 horizontal upscale.
+        // The GPU shader handles BGRA→RGB swizzle and 8→4 vertical downscale.
         let bpp = 4usize; // BGRA bytes per pixel
         let row_bytes = input_width * bpp;
 
         if row_length == input_width {
             // Strides match — single memcpy for the entire row block
-            let start = top * 4 * row_bytes;
-            let total = (bottom - top) * 4 * row_bytes;
+            let start = top * 8 * row_bytes;
+            let total = (bottom - top) * 8 * row_bytes;
             unsafe {
                 ptr::copy_nonoverlapping(
                     pixels.as_ptr().add(start),
@@ -273,10 +273,10 @@ impl Renderer {
             }
         } else {
             // Different strides — copy row by row
-            let copy_bytes = (right - left) * 2 * bpp;
-            for py in (top * 4)..(bottom * 4) {
-                let src_offset = (py * row_length + left * 2) * bpp;
-                let dst_offset = (py * input_width + left * 2) * bpp;
+            let copy_bytes = (right - left) * 4 * bpp;
+            for py in (top * 8)..(bottom * 8) {
+                let src_offset = (py * row_length + left * 4) * bpp;
+                let dst_offset = (py * input_width + left * 4) * bpp;
                 unsafe {
                     ptr::copy_nonoverlapping(
                         pixels.as_ptr().add(src_offset),
@@ -369,14 +369,14 @@ impl Renderer {
             let index = (y + 1) * viewport.width;
             let start = index + left;
             let end = index + right;
-            let (mut x, y) = (left * 2, y * 4);
+            let (mut x, y) = (left * 4, y * 8);
 
             for (_, cell) in &mut self.cells[start..end] {
                 let quadrant = (
                     pair(x + 0, y + 0),
-                    pair(x + 1, y + 0),
-                    pair(x + 1, y + 2),
-                    pair(x + 0, y + 2),
+                    pair(x + 2, y + 0),
+                    pair(x + 2, y + 4),
+                    pair(x + 0, y + 4),
                 );
 
                 cell.quadrant = quadrant;
@@ -385,7 +385,7 @@ impl Renderer {
                 cell.foreground = fg;
                 cell.codepoint = ch.chars().next().unwrap_or(' ') as u32;
 
-                x += 2;
+                x += 4;
             }
         }
     }
@@ -444,8 +444,8 @@ impl Renderer {
         let viewport = &self.size.cast::<usize>();
 
         if size.width > 2 && size.height > 2 {
-            let origin = (origin.cast::<f32>() / (2.0, 4.0) + (0.0, 1.0)).round();
-            let size = (size.cast::<f32>() / (2.0, 4.0)).round();
+            let origin = (origin.cast::<f32>() / (4.0, 8.0) + (0.0, 1.0)).round();
+            let size = (size.cast::<f32>() / (4.0, 8.0)).round();
             let left = (origin.x.max(0.0) as usize).min(viewport.width);
             let right = ((origin.x + size.width).max(0.0) as usize).min(viewport.width);
             let top = (origin.y.max(0.0) as usize).min(viewport.height);
@@ -462,7 +462,7 @@ impl Renderer {
             }
         } else {
             // Compute the buffer index based on the position
-            let index = origin.x / 2 + (origin.y + 1) / 4 * (viewport.width as i32);
+            let index = origin.x / 4 + (origin.y + 1) / 8 * (viewport.width as i32);
             let mut iter = self.cells[len.min(index as usize)..].iter_mut();
 
             // Get every Unicode grapheme in the input string
